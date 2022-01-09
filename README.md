@@ -7,3 +7,10 @@ AWS 在 re:Invent 2017 上推出了他们的托管 Kubernetes 服务 Amazon Elas
 我们的客户现在询问何时以及如何将 EKS 集群从 Amazon EBS in-tree 插件迁移到 Amazon EBS CSI 驱动程序，以利用其他 EBS 卷类型（如 gp3 和 io2）并利用新功能（如 Kubernetes 卷快照）。 
 
 自 Kubernetes v1.17 以来，容器存储接口 (CSI) 迁移基础设施一直处于测试功能状态，并在[此 K8s 博客](https://kubernetes.io/blog/2019/12/09/kubernetes-1-17-feature-csi-migration-beta/)文章中进行了详细描述。 迁移最终会从 Kubernetes 源代码中删除 in-tree 插件，并且所有迁移的卷将由 CSI 驱动程序控制，了解这一点很重要。 这并不意味着这些迁移的 PV 将获得 CSI 驱动程序的新功能和属性。 它仅支持已被树内驱动程序支持的功能，如[此处](https://github.com/kubernetes-csi/external-snapshotter/pull/490#issuecomment-813598646)所述。 
+
+这篇博文将引导您完成迁移方案并详细概述必要的步骤。 
+
+## 先决条件 
+您需要一个版本为 1.17 或更高版本的 EKS 集群以及相应版本的 kubectl。 确保您已获得安装 Amazon EBS CSI 相关对象的授权。 
+
+Kubernetes 使用所谓的[feature gates]https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/ 来实现存储迁移。 Amazon EBS 的 [CSIMigration 和 CSIMigrationAWS](https://kubernetes.io/docs/concepts/storage/volumes/#aws-ebs-csi-migration) 功能在启用时会将所有插件操作从现有的 in-tree 插件重定向到 ebs.csi.aws.com CSI 驱动程序。 请注意，Amazon EKS 尚未为 Amazon EBS 迁移启用 CSIMigration 和 CSIMigrationAWS 功能。 不过，您已经可以与 in-tree 插件并行使用 Amazon EBS CSI 驱动程序。 
