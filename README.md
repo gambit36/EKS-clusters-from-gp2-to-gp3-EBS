@@ -281,3 +281,202 @@ $ kubectl get volumesnapshotcontent imported-aws-snapshot-content
 NAME                            READYTOUSE   RESTORESIZE   DELETIONPOLICY   DRIVER            VOLUMESNAPSHOTCLASS   VOLUMESNAPSHOT          VOLUMESNAPSHOTNAMESPACE   AGE
 imported-aws-snapshot-content   true         1073741824    Delete           ebs.csi.aws.com   ebs-csi-aws           imported-aws-snapshot   default                   12s
 ```
+
+现在我们需要创建引用 VolumeSnapshotContent 对象的 VolumeSnapshot： 
+```
+$ cat vs-csi.yaml
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: imported-aws-snapshot
+  namespace: default
+spec:
+  volumeSnapshotClassName: ebs-csi-aws
+  source:
+    volumeSnapshotContentName: imported-aws-snapshot-content
+
+$ kubectl apply -f  vs-csi.yaml
+volumesnapshot.snapshot.storage.k8s.io/imported-aws-snapshot created
+$ kubectl get volumesnapshot imported-aws-snapshot
+NAME                    READYTOUSE   SOURCEPVC   SOURCESNAPSHOTCONTENT           RESTORESIZE   SNAPSHOTCLASS   SNAPSHOTCONTENT                 CREATIONTIME   AGE
+imported-aws-snapshot   true                     imported-aws-snapshot-content   1Gi           ebs-csi-aws     imported-aws-snapshot-content   33m            60s
+```
+
+在此迁移过程中，我们希望从新的 Amazon EBS gp3 存储类中受益。 为此，我们必须创建一个基于 CSI 的 gp3 存储类！ 因为我们希望此 SC 成为默认 SC，所以我们首先从 Amazon EKS 默认 SC gp2 中删除注释： 
+
+```
+$ kubectl annotate sc gp2 storageclass.kubernetes.io/is-default-class-
+storageclass.storage.k8s.io/gp2 annotated
+
+$ kubectl get sc gp2
+NAME   PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+gp2    kubernetes.io/aws-ebs   Delete          WaitForFirstConsumer   false                  243d
+
+$ cat gp3-def-sc.yaml
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+allowVolumeExpansion: true
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  type: gp3
+
+$ kubectl apply -f gp3-def-sc.yaml
+storageclass.storage.k8s.io/gp3 created
+
+$ kubectl get sc gp3
+NAME            PROVISIONER       RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+gp3 (default)   ebs.csi.aws.com   Delete          WaitForFirstConsumer   true                   6s
+```
+
+我们之前创建的 VolumeSnapshot 可用于创建 PersistentVolumeClaim。 作为存储类，我们使用新的基于 gp3 CSI 的 SC。 
+```
+$ cat pvc-vs-csi.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: imported-aws-snapshot-pvc
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 1Gi
+  dataSource:
+    name: imported-aws-snapshot
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io
+
+$ kubectl apply -f pvc-vs-csi.yaml
+persistentvolumeclaim/imported-aws-snapshot-pvc created
+
+$ kubectl get pvc imported-aws-snapshot-pvc
+NAME                        STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+imported-aws-snapshot-pvc   Pending                                      gp3            54s
+```
+
+请注意，PVC 仍处于挂起状态，因为 gp3 SC 使用 WaitForFirstConsumer 的 volumeBindingMode。 所以我们必须再次创建一个应用程序（pod）来创建一个底层的 PV。 出于演示目的，我们只挂载 PVC 而不写入新数据，并使用“kubectl exec”查看快照的数据：
+```
+$ cat test-pod-snap.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-imported-snapshot-csi
+spec:
+  containers:
+  - name: app
+    image: centos
+    args:
+    - sleep
+    - "10000"
+    volumeMounts:
+    - name: persistent-storage
+      mountPath: /data
+  volumes:
+  - name: persistent-storage
+    persistentVolumeClaim:
+      claimName: imported-aws-snapshot-pvc
+
+$ kubectl apply -f test-pod-snap.yaml
+pod/app-imported-snapshot-csi created
+```
+
+一个 PV pvc-25d2d19d-6ede-47d2-bd2e-32d45832ec20 被自动创建并且 pod 正在运行并且可以访问迁移的数据： 
+```
+$ kubectl get pvc imported-aws-snapshot-pvc
+NAME                        STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+imported-aws-snapshot-pvc   Bound    pvc-25d2d19d-6ede-47d2-bd2e-32d45832ec20   1Gi        RWO            gp3            11m
+
+$ kubectl get po app-imported-snapshot-csi
+NAME                        READY   STATUS    RESTARTS   AGE
+app-imported-snapshot-csi   1/1     Running   0          85s
+
+$ kubectl exec app-imported-snapshot-csi -- sh -c "cat /data/out.txt" | more
+Thu Sep 16 13:56:04 UTC 2021
+Thu Sep 16 13:56:09 UTC 2021
+Thu Sep 16 13:56:14 UTC 2021
+…
+```
+
+正如预期的那样，PVC 使用基于 CSI 的 gp3 SC： 
+```
+$ kubectl get pv pvc-25d2d19d-6ede-47d2-bd2e-32d45832ec20
+NAME                                       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM                               STORAGECLASS   REASON   AGE
+pvc-25d2d19d-6ede-47d2-bd2e-32d45832ec20   1Gi        RWO            Delete           Bound    default/imported-aws-snapshot-pvc   gp3                     3m34s
+
+$ kubectl get pv pvc-25d2d19d-6ede-47d2-bd2e-32d45832ec20 -o yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  annotations:
+    pv.kubernetes.io/provisioned-by: ebs.csi.aws.com
+  creationTimestamp: "2021-09-17T09:57:15Z"
+  finalizers:
+  - kubernetes.io/pv-protection
+  - external-attacher/ebs-csi-aws-com
+  name: pvc-25d2d19d-6ede-47d2-bd2e-32d45832ec20
+…
+spec:
+  accessModes:
+  - ReadWriteOnce
+  capacity:
+    storage: 1Gi
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    name: imported-aws-snapshot-pvc
+    namespace: default
+…
+  csi:
+    driver: ebs.csi.aws.com
+    fsType: ext4
+    volumeAttributes:
+      storage.kubernetes.io/csiProvisionerIdentity: 1630589410219-8081-ebs.csi.aws.com
+    volumeHandle: vol-036ef87c533d529de
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: topology.ebs.csi.aws.com/zone
+          operator: In
+          values:
+          - eu-central-1c
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: gp3
+  volumeMode: Filesystem
+status:
+  phase: Bound
+```
+
+## 清理环境
+为避免不必要的成本，请在执行演示迁移后清理您的环境。 
+
+```
+$ kubectl delete pod app-imported-snapshot-csi
+
+$ kubectl delete pvc imported-aws-snapshot-pvc
+
+$ kubectl delete volumesnapshotcontent imported-aws-snapshot-content
+
+$ kubectl delete volumesnapshot imported-aws-snapshot
+
+$ aws ec2 delete-snapshot --snapshot-ids <snap-id>
+
+$ kubectl delete pv <pvc-id>
+```
+
+为了将来使用，您可以将 CSI 驱动程序保留在 EKS 集群中。 
+
+## 总结
+
+Amazon EKS 为客户提供托管控制平面、用于管理数据平面（托管节点组）的选项以及 AWS VPC CNI、CoreDNS 和 kube-proxy 等关键组件的托管集群附加组件。 一旦与 Amazon EBS CSI 迁移相关的所有功能都完成后，AWS 将为您处理在托管控制平面和数据平面上实施所有零碎的繁重工作！
+
+这篇博文描述了您甚至可以从今天开始将您的工作负载迁移到 PersistentVolumes，它支持 Amazon EBS CSI 驱动程序的所有新功能和特性。
+
+我们希望这篇文章对您的 Kubernetes 项目有所帮助。 如果您有任何问题或建议，请发表评论。 
+  
