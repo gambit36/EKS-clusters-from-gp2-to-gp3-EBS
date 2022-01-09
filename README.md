@@ -14,3 +14,5 @@ AWS 在 re:Invent 2017 上推出了他们的托管 Kubernetes 服务 Amazon Elas
 您需要一个版本为 1.17 或更高版本的 EKS 集群以及相应版本的 kubectl。 确保您已获得安装 Amazon EBS CSI 相关对象的授权。 
 
 Kubernetes 使用所谓的[feature gates]https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/ 来实现存储迁移。 Amazon EBS 的 [CSIMigration 和 CSIMigrationAWS](https://kubernetes.io/docs/concepts/storage/volumes/#aws-ebs-csi-migration) 功能在启用时会将所有插件操作从现有的 in-tree 插件重定向到 ebs.csi.aws.com CSI 驱动程序。 请注意，Amazon EKS 尚未为 Amazon EBS 迁移启用 CSIMigration 和 CSIMigrationAWS 功能。 不过，您已经可以与 in-tree 插件并行使用 Amazon EBS CSI 驱动程序。 
+
+为了演示起见，我们将创建一个动态 PersistentVolume (PV)，稍后我们将对其进行迁移。 
