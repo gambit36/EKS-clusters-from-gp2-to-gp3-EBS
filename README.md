@@ -42,3 +42,111 @@ spec:
 $ kubectl apply -f ebs-gp2-claim.yaml
 persistentvolumeclaim/ebs-gp2-claim created
 ```
+
+由于 gp2 StorageClass 具有 WaitForFirstConsumer 的 Volume Binding Mode（属性 volumeBindingMode）并且尚无 Pod 消费 PVC，因此 PVC 的创建状态为“pending”。 
+
+```
+$ kubectl get pvc ebs-gp2-claim
+NAME            STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+ebs-gp2-claim   Pending                                      gp2            45s
+```
+
+因此，让我们创建一个使用 PVC 的 pod（我们的“演示应用程序”）： 
+```
+$ cat test-pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-gp2-in-tree
+spec:
+  containers:
+  - name: app
+    image: centos
+    command: ["/bin/sh"]
+    args: ["-c", "while true; do echo $(date -u) >> /data/out.txt; sleep 5; done"]
+    volumeMounts:
+    - name: persistent-storage
+      mountPath: /data
+  volumes:
+  - name: persistent-storage
+    persistentVolumeClaim:
+      claimName: ebs-gp2-claim
+
+$ kubectl apply -f test-pod.yaml
+pod/app-gp2-in-tree created
+```
+
+几秒钟后，pod 被创建： 
+```
+$ kubectl get po app-gp2-in-tree
+NAME              READY   STATUS    RESTARTS   AGE
+app-gp2-in-tree   1/1     Running   0          16s
+```
+
+这将动态提供底层 PV pvc-646fef81-c677-46f4-8f27-9d394618f236，它现在绑定到 PVC “ebs-gp2-claim” 
+```
+$ kubectl get pvc ebs-gp2-claim
+NAME            STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+ebs-gp2-claim   Bound    pvc-646fef81-c677-46f4-8f27-9d394618f236   1Gi        RWO            gp2            5m3s
+```
+
+让我们快速检查一下该卷是否包含一些数据： 
+```
+$ kubectl exec app-gp2-in-tree -- sh -c "cat /data/out.txt"
+…
+Thu Sep 16 13:56:34 UTC 2021
+Thu Sep 16 13:56:39 UTC 2021
+Thu Sep 16 13:56:44 UTC 2021
+```
+
+先来看看PV的细节： 
+```
+$ kubectl get pv pvc-646fef81-c677-46f4-8f27-9d394618f236
+NAME                                       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM                   STORAGECLASS   REASON   AGE
+pvc-646fef81-c677-46f4-8f27-9d394618f236   1Gi        RWO            Delete           Bound    default/ebs-gp2-claim   gp2                     2m54s
+
+$ kubectl get pv pvc-646fef81-c677-46f4-8f27-9d394618f236 -o yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  annotations:
+    kubernetes.io/createdby: aws-ebs-dynamic-provisioner
+    pv.kubernetes.io/bound-by-controller: "yes"
+    pv.kubernetes.io/provisioned-by: kubernetes.io/aws-ebs
+…
+  labels:
+    topology.kubernetes.io/region: eu-central-1
+    topology.kubernetes.io/zone: eu-central-1c
+  name: pvc-646fef81-c677-46f4-8f27-9d394618f236
+…
+spec:
+  accessModes:
+  - ReadWriteOnce
+  awsElasticBlockStore:
+    fsType: ext4
+    volumeID: aws://eu-central-1c/vol-03d3cd818a2c2def3
+…
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values:
+          - eu-central-1c
+        - key: topology.kubernetes.io/region
+          operator: In
+          values:
+          - eu-central-1
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: gp2
+…
+```
+
+PV 是（如预期的）由“kubernetes.io/aws-ebs”供应商创建的，如注释中所示。 规范部分中的“awsElasticBlockStore.volumeId”属性显示了实际的 Amazon EBS 卷 ID“vol-03d3cd818a2c2def3”以及创建 EBS 卷的 AWS 可用区 (AZ)——在本例中为 eu-central-1c。 EBS 卷和 EC2 实例是地区（非区域）资源。 nodeAffinity 部分建议 kube-scheduler 在创建 PV 的同一可用区中的节点上配置 pod。
+
+以下命令是检索 Amazon EBS 详细信息的简短格式： 
+```
+$ kubectl get pv pvc-646fef81-c677-46f4-8f27-9d394618f236 –o jsonpath='{.spec.awsElasticBlockStore.volumeID}'
+aws://eu-central-1c/vol-03d3cd818a2c2def3
+```
