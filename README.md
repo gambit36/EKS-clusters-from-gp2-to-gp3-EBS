@@ -150,3 +150,19 @@ PV 是（如预期的）由“kubernetes.io/aws-ebs”供应商创建的，如�
 $ kubectl get pv pvc-646fef81-c677-46f4-8f27-9d394618f236 –o jsonpath='{.spec.awsElasticBlockStore.volumeID}'
 aws://eu-central-1c/vol-03d3cd818a2c2def3
 ```
+
+我们希望将此 PV 用于稍后描述的存储迁移场景。 为了确保在删除相应的 PVC 时不会删除 PV，我们将把“VolumeReclaimPolicy”修补为“Retain”。 注意：这只能在 PV 级别而不是 SC 级别！ 
+```
+$ kubectl patch pv pvc-646fef81-c677-46f4-8f27-9d394618f236 -p '{"spec":{"persistentVolumeReclaimPol
+icy":"Retain"}}'
+persistentvolume/pvc-646fef81-c677-46f4-8f27-9d394618f236 patched
+$ kubectl get pv pvc-646fef81-c677-46f4-8f27-9d394618f236
+NAME                                       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM                   STORAGECLASS   REASON   AGE
+pvc-646fef81-c677-46f4-8f27-9d394618f236   1Gi        RWO            Retain           Bound    default/ebs-gp2-claim   gp2                     9m4s
+```
+
+要安装 Amazon EBS CSI 驱动程序，请按照我们的 GitHub 文档进行操作。 所需的高级步骤是：
+
+* 将 Amazon EBS 操作所需的 IAM 权限附加到工作线程节点配置文件，或者按照最低权限使用 IRSA（服务账户的 IAM 角色）创建正确注释的 ServiceAccount (SA)
+* 使用 YAML 安装外部卷快照控制器相关的 K8s 对象（CRD、RBAC 资源、部署和验证 webhook）
+* 使用 YAML 或使用相应的 Helm chart 安装 Amazon EBS CSI 驱动程序（如果您使用 IRSA，请使用现有的服务帐户） 
